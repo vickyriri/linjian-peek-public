@@ -64,26 +64,14 @@ jobs:
               '        guidianEnabled = findViewById(R.id.guidianEnabled); guidianRemoteEnabled = findViewById(R.id.guidianRemoteEnabled); guidianFullscreenEnabled = findViewById(R.id.guidianFullscreenEnabled); guidianQuietEnabled = findViewById(R.id.guidianQuietEnabled); calendarLunarEnabled = findViewById(R.id.calendarLunarEnabled); calendarRepeatEnabled = findViewById(R.id.calendarRepeatEnabled); calendarBannerEnabled = findViewById(R.id.calendarBannerEnabled);\n',
               '        guidianEnabled = findViewById(R.id.guidianEnabled); guidianRemoteEnabled = findViewById(R.id.guidianRemoteEnabled); guidianFullscreenEnabled = findViewById(R.id.guidianFullscreenEnabled); guidianQuietEnabled = findViewById(R.id.guidianQuietEnabled); calendarLunarEnabled = findViewById(R.id.calendarLunarEnabled); calendarRepeatEnabled = findViewById(R.id.calendarRepeatEnabled); calendarBannerEnabled = findViewById(R.id.calendarBannerEnabled); companionCloudSyncEnabled = findViewById(R.id.companionCloudSyncEnabled);\n',
               'MainActivity bind cloud-sync checkbox')
-          old_sync = '''        renderCompanionState(CompanionWindowState.cached(this));
-        long now = System.currentTimeMillis();
-        if (now - lastCompanionSyncAt > 30_000L && AppPrefs.server(this) != null && !AppPrefs.server(this).trim().isEmpty()) {
-            lastCompanionSyncAt = now;
-            CompanionWindowState.sync(this, 20, (state, error) -> runOnUiThread(() -> renderCompanionState(state)));
-        }
-'''
-          new_sync = '''        renderCompanionState(CompanionWindowState.cached(this));
-        boolean companionCloudSync = AppPrefs.get(this).getBoolean(PREF_COMPANION_CLOUD_SYNC_ENABLED, false);
-        if (companionCloudSyncStatusText != null) {
-            companionCloudSyncStatusText.setText("陪伴云同步：" + (companionCloudSync ? "已开启" : "已关闭 · 仅本地")
-                    + " · 待同步轨迹 " + ActivityEventStore.pendingCount(this) + " 条");
-        }
-        long now = System.currentTimeMillis();
-        if (companionCloudSync && now - lastCompanionSyncAt > 30_000L && AppPrefs.server(this) != null && !AppPrefs.server(this).trim().isEmpty()) {
-            lastCompanionSyncAt = now;
-            CompanionWindowState.sync(this, 20, (state, error) -> runOnUiThread(() -> renderCompanionState(state)));
-        }
-'''
-          s = replace_once(s, old_sync, new_sync, 'MainActivity gate CompanionWindowState.sync')
+          s = replace_once(s,
+              '        renderCompanionState(CompanionWindowState.cached(this));\n',
+              '        renderCompanionState(CompanionWindowState.cached(this));\n        boolean companionCloudSync = AppPrefs.get(this).getBoolean(PREF_COMPANION_CLOUD_SYNC_ENABLED, false);\n        if (companionCloudSyncStatusText != null) {\n            companionCloudSyncStatusText.setText("陪伴云同步：" + (companionCloudSync ? "已开启" : "已关闭 · 仅本地")\n                    + " · 待同步轨迹 " + ActivityEventStore.pendingCount(this) + " 条");\n        }\n',
+              'MainActivity companion sync status')
+          s = replace_once(s,
+              '        if (now - lastCompanionSyncAt > 30_000L && AppPrefs.server(this) != null && !AppPrefs.server(this).trim().isEmpty()) {\n',
+              '        if (companionCloudSync && now - lastCompanionSyncAt > 30_000L && AppPrefs.server(this) != null && !AppPrefs.server(this).trim().isEmpty()) {\n',
+              'MainActivity gate CompanionWindowState.sync')
           p.write_text(s)
 
           # --- activity_main.xml: visible switch in connection settings ---
@@ -234,9 +222,12 @@ jobs:
         run: |
           git config user.name "Astra Cat Engineering"
           git config user.email "actions@users.noreply.github.com"
+          git checkout 58ca6049f02e9870446ca0a64ce24b09248d430f -- .github/workflows/android-debug.yml
           git rm .github/workflows/astra-v02-patch.yml
+          if [ -f android/ASTRA_V02_TRIGGER.txt ]; then git rm android/ASTRA_V02_TRIGGER.txt; fi
           git add android/app/src/main/java/dev/linjian/peek/MainActivity.java \
                   android/app/src/main/java/dev/linjian/peek/ActivityEventStore.java \
-                  android/app/src/main/res/layout/activity_main.xml
+                  android/app/src/main/res/layout/activity_main.xml \
+                  .github/workflows/android-debug.yml
           git commit -m "feat(android): Astra Custom v0.2 local-first polish"
           git push origin HEAD:astra-custom
