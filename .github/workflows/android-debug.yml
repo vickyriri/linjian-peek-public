@@ -66,6 +66,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git checkout 58ca6049f02e9870446ca0a64ce24b09248d430f -- .github/workflows/android-debug.yml
           git rm .github/workflows/astra-v02-patch.yml
+          if [ -f android/ASTRA_V02_TRIGGER.txt ]; then git rm android/ASTRA_V02_TRIGGER.txt; fi
           git add android/app/src/main/java/dev/linjian/peek/MainActivity.java \
                   android/app/src/main/java/dev/linjian/peek/ActivityEventStore.java \
                   android/app/src/main/res/layout/activity_main.xml \
