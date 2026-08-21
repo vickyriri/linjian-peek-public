@@ -20,12 +20,15 @@ import java.util.UUID;
 public final class ActivityEventStore {
     private static final String KEY_EVENTS = "activity_events_v1";
     private static final String KEY_LAST_PACKAGE = "activity_last_foreground_package_v1";
+    private static final String KEY_PENDING = "activity_events_pending_v1";
     private static final int MAX_EVENTS = 500;
+    private static volatile boolean pendingUploadRunning = false;
 
     private ActivityEventStore() { }
 
     public static synchronized JSONObject add(Context ctx, JSONObject input, boolean upload) {
         JSONObject event = normalize(ctx, input);
+        try { event.put("cloud_synced", !upload); } catch (Exception ignored) { }
         try {
             SharedPreferences p = AppPrefs.get(ctx);
             JSONArray old = new JSONArray(p.getString(KEY_EVENTS, "[]"));
@@ -35,9 +38,11 @@ public final class ActivityEventStore {
                 JSONObject item = old.optJSONObject(i);
                 if (item != null && !event.optString("id").equals(item.optString("id"))) kept.put(item);
             }
-            p.edit().putString(KEY_EVENTS, kept.toString()).apply();
+            SharedPreferences.Editor editor = p.edit().putString(KEY_EVENTS, kept.toString());
+            if (upload) editor.putBoolean(KEY_PENDING, true);
+            editor.apply();
         } catch (Exception ignored) { }
-        if (upload) uploadAsync(ctx.getApplicationContext(), event);
+        if (upload && cloudSyncAllowed(ctx)) uploadPendingAsync(ctx.getApplicationContext());
         return event;
     }
 
@@ -126,9 +131,108 @@ public final class ActivityEventStore {
             java.util.Collections.sort(items, (a, b) -> Long.compare(timeOf(b), timeOf(a)));
             JSONArray kept = new JSONArray();
             for (int i = 0; i < items.size() && i < MAX_EVENTS; i++) kept.put(items.get(i));
-            AppPrefs.get(ctx).edit().putString(KEY_EVENTS, kept.toString()).apply();
+            AppPrefs.get(ctx).edit().putString(KEY_EVENTS, kept.toString()).putBoolean(KEY_PENDING, containsPending(kept)).apply();
         } catch (Exception ignored) { }
     }
+
+    /** Flush locally queued activity events. Call from a background thread. */
+    public static int flushPending(Context ctx) {
+        Context app = ctx.getApplicationContext();
+        if (!cloudSyncAllowed(app) || !AppPrefs.get(app).getBoolean(KEY_PENDING, false)) return 0;
+        if (!beginPendingUpload()) return 0;
+        try { return flushPendingInternal(app); }
+        finally { endPendingUpload(); }
+    }
+
+    private static void uploadPendingAsync(Context ctx) {
+        Context app = ctx.getApplicationContext();
+        if (!cloudSyncAllowed(app) || !AppPrefs.get(app).getBoolean(KEY_PENDING, false)) return;
+        if (!beginPendingUpload()) return;
+        new Thread(() -> {
+            try { flushPendingInternal(app); }
+            finally { endPendingUpload(); }
+        }, "activity-event-sync").start();
+    }
+
+    private static int flushPendingInternal(Context ctx) {
+        int sent = 0;
+        try {
+            JSONArray all = new JSONArray(AppPrefs.get(ctx).getString(KEY_EVENTS, "[]"));
+            // Upload oldest first so the server receives an offline window in chronological order.
+            for (int i = all.length() - 1; i >= 0; i--) {
+                JSONObject event = all.optJSONObject(i);
+                if (!isPending(event)) continue;
+                if (!cloudSyncAllowed(ctx) || !uploadOne(ctx, event)) break;
+                sent++;
+            }
+            JSONArray after = new JSONArray(AppPrefs.get(ctx).getString(KEY_EVENTS, "[]"));
+            AppPrefs.get(ctx).edit().putBoolean(KEY_PENDING, containsPending(after)).apply();
+            if (sent > 0) DebugState.append(ctx, "已补传本地轨迹 " + sent + " 条");
+        } catch (Exception ignored) { }
+        return sent;
+    }
+
+    private static boolean uploadOne(Context ctx, JSONObject event) {
+        String base = AppPrefs.server(ctx), token = AppPrefs.token(ctx);
+        if (base == null || base.trim().isEmpty() || token == null || token.trim().isEmpty()) return false;
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(base.replaceAll("/+$", "") + "/api/activity/events").openConnection();
+            c.setRequestMethod("POST");
+            c.setConnectTimeout(7000);
+            c.setReadTimeout(7000);
+            c.setDoOutput(true);
+            c.setRequestProperty("X-Auth-Token", token);
+            c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            try (OutputStream out = c.getOutputStream()) { out.write(event.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = c.getResponseCode();
+            if (code >= 200 && code < 300) {
+                markSynced(ctx, event.optString("id", ""));
+                return true;
+            }
+        } catch (Exception ignored) { }
+        finally { if (c != null) c.disconnect(); }
+        return false;
+    }
+
+    private static synchronized void markSynced(Context ctx, String id) {
+        if (id == null || id.isEmpty()) return;
+        try {
+            SharedPreferences p = AppPrefs.get(ctx);
+            JSONArray all = new JSONArray(p.getString(KEY_EVENTS, "[]"));
+            for (int i = 0; i < all.length(); i++) {
+                JSONObject e = all.optJSONObject(i);
+                if (e != null && id.equals(e.optString("id", ""))) {
+                    e.put("cloud_synced", true);
+                    break;
+                }
+            }
+            p.edit().putString(KEY_EVENTS, all.toString()).putBoolean(KEY_PENDING, containsPending(all)).apply();
+        } catch (Exception ignored) { }
+    }
+
+    private static boolean cloudSyncAllowed(Context ctx) {
+        return !AppPrefs.get(ctx).getBoolean("user_stopped", true);
+    }
+
+    private static boolean isPending(JSONObject event) {
+        // Pre-upgrade records did not carry this local-only marker; treat them as already handled.
+        return event != null && event.has("cloud_synced") && !event.optBoolean("cloud_synced", true);
+    }
+
+    private static boolean containsPending(JSONArray events) {
+        if (events == null) return false;
+        for (int i = 0; i < events.length(); i++) if (isPending(events.optJSONObject(i))) return true;
+        return false;
+    }
+
+    private static synchronized boolean beginPendingUpload() {
+        if (pendingUploadRunning) return false;
+        pendingUploadRunning = true;
+        return true;
+    }
+
+    private static synchronized void endPendingUpload() { pendingUploadRunning = false; }
 
     private static JSONObject normalize(Context ctx, JSONObject input) {
         JSONObject e = new JSONObject();
@@ -146,20 +250,6 @@ public final class ActivityEventStore {
             e.put("metadata_json", metadata == null ? new JSONObject() : metadata);
         } catch (Exception ignored) { }
         return e;
-    }
-
-    private static void uploadAsync(Context ctx, JSONObject event) {
-        String base = AppPrefs.server(ctx), token = AppPrefs.token(ctx);
-        if (base == null || base.trim().isEmpty() || token == null || token.trim().isEmpty()) return;
-        new Thread(() -> {
-            try {
-                HttpURLConnection c = (HttpURLConnection) new URL(base.replaceAll("/+$", "") + "/api/activity/events").openConnection();
-                c.setRequestMethod("POST"); c.setConnectTimeout(7000); c.setReadTimeout(7000); c.setDoOutput(true);
-                c.setRequestProperty("X-Auth-Token", token); c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-                try (OutputStream out = c.getOutputStream()) { out.write(event.toString().getBytes(StandardCharsets.UTF_8)); }
-                c.getResponseCode(); c.disconnect();
-            } catch (Exception ignored) { }
-        }, "activity-event-upload").start();
     }
 
     private static String appLabel(Context ctx, String pkg) {
