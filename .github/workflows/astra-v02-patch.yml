@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: astra-custom
+          fetch-depth: 0
 
       - name: Apply v0.2 source patch
         run: python3 .github/scripts/apply_astra_v02.py
