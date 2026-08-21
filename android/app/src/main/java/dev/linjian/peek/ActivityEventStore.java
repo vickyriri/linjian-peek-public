@@ -1,8 +1,10 @@
 package dev.linjian.peek;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.ResolveInfo;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -21,7 +23,8 @@ public final class ActivityEventStore {
     private static final String KEY_EVENTS = "activity_events_v1";
     private static final String KEY_LAST_PACKAGE = "activity_last_foreground_package_v1";
     private static final String KEY_PENDING = "activity_events_pending_v1";
-    private static final int MAX_EVENTS = 500;
+    private static final String KEY_PENDING_COUNT = "activity_events_pending_count_v1";
+    private static final int MAX_EVENTS = 2000;
     private static volatile boolean pendingUploadRunning = false;
     private static final Object LISTENER_LOCK = new Object();
     private static SharedPreferences observedPrefs;
@@ -36,14 +39,18 @@ public final class ActivityEventStore {
         try {
             SharedPreferences p = AppPrefs.get(ctx);
             JSONArray old = new JSONArray(p.getString(KEY_EVENTS, "[]"));
-            JSONArray kept = new JSONArray();
-            kept.put(event);
-            for (int i = 0; i < old.length() && kept.length() < MAX_EVENTS; i++) {
+            java.util.ArrayList<JSONObject> items = new java.util.ArrayList<>();
+            items.add(event);
+            for (int i = 0; i < old.length(); i++) {
                 JSONObject item = old.optJSONObject(i);
-                if (item != null && !event.optString("id").equals(item.optString("id"))) kept.put(item);
+                if (item != null && !event.optString("id").equals(item.optString("id"))) items.add(item);
             }
-            SharedPreferences.Editor editor = p.edit().putString(KEY_EVENTS, kept.toString());
-            if (upload) editor.putBoolean(KEY_PENDING, true);
+            trimForStorage(items);
+            JSONArray kept = new JSONArray();
+            for (JSONObject item : items) kept.put(item);
+            int pending = pendingCountOf(kept);
+            SharedPreferences.Editor editor = p.edit().putString(KEY_EVENTS, kept.toString())
+                    .putBoolean(KEY_PENDING, pending > 0).putInt(KEY_PENDING_COUNT, pending);
             editor.apply();
         } catch (Exception ignored) { }
         if (upload && cloudSyncAllowed(ctx)) uploadPendingAsync(ctx.getApplicationContext());
@@ -53,9 +60,10 @@ public final class ActivityEventStore {
     public static void recordForegroundChange(Context ctx, String packageName) {
         if (!AppPrefs.get(ctx).getBoolean(AppPrefs.KEY_JOURNEY_ENABLED, true)) return;
         String pkg = packageName == null ? "" : packageName.trim();
-        if (pkg.isEmpty() || pkg.equals("com.android.systemui") || pkg.contains("inputmethod")) return;
+        if (pkg.isEmpty() || pkg.equals("com.android.systemui") || pkg.contains("inputmethod") || isHomeLauncher(ctx, pkg)) return;
         SharedPreferences p = AppPrefs.get(ctx);
         String previous = p.getString(KEY_LAST_PACKAGE, "");
+        if (isHomeLauncher(ctx, previous)) previous = "";
         if (pkg.equals(previous)) return;
         p.edit().putString(KEY_LAST_PACKAGE, pkg).apply();
         String app = appLabel(ctx, pkg);
@@ -86,6 +94,7 @@ public final class ActivityEventStore {
                 if (e == null) continue;
                 if (source != null && !source.isEmpty() && !source.equals(e.optString("source"))) continue;
                 if (todayOnly && !e.optString("local_date", "").equals(today)) continue;
+                if (isHomeLauncher(ctx, e.optString("package_name", ""))) continue;
                 out.put(e);
             }
         } catch (Exception ignored) { }
@@ -109,6 +118,7 @@ public final class ActivityEventStore {
             for (int i = 0; i < all.length() && out.length() < limit; i++) {
                 JSONObject e = all.optJSONObject(i); if (e == null) continue;
                 if (todayOnly && !today.equals(e.optString("local_date", ""))) continue;
+                if (isHomeLauncher(ctx, e.optString("package_name", ""))) continue;
                 String source = e.optString("source", ""), type = e.optString("type", "");
                 boolean matches = phoneCategory
                         ? ("phone".equals(source) || "app_open".equals(type) || "guidian_return".equals(type) || "screen_break_trigger".equals(type))
@@ -136,9 +146,11 @@ public final class ActivityEventStore {
                 }
             }
             java.util.Collections.sort(items, (a, b) -> Long.compare(timeOf(b), timeOf(a)));
+            trimForStorage(items);
             JSONArray kept = new JSONArray();
-            for (int i = 0; i < items.size() && i < MAX_EVENTS; i++) kept.put(items.get(i));
-            AppPrefs.get(ctx).edit().putString(KEY_EVENTS, kept.toString()).putBoolean(KEY_PENDING, containsPending(kept)).apply();
+            for (JSONObject item : items) kept.put(item);
+            int pending = pendingCountOf(kept);
+            AppPrefs.get(ctx).edit().putString(KEY_EVENTS, kept.toString()).putBoolean(KEY_PENDING, pending > 0).putInt(KEY_PENDING_COUNT, pending).apply();
         } catch (Exception ignored) { }
     }
 
@@ -201,8 +213,9 @@ public final class ActivityEventStore {
                 sent++;
             }
             JSONArray after = new JSONArray(AppPrefs.get(ctx).getString(KEY_EVENTS, "[]"));
-            AppPrefs.get(ctx).edit().putBoolean(KEY_PENDING, containsPending(after)).apply();
-            if (sent > 0) DebugState.append(ctx, "已补传本地轨迹 " + sent + " 条");
+            int remaining = pendingCountOf(after);
+            AppPrefs.get(ctx).edit().putBoolean(KEY_PENDING, remaining > 0).putInt(KEY_PENDING_COUNT, remaining).apply();
+            if (sent > 1) DebugState.append(ctx, "已同步离线轨迹 " + sent + " 条");
         } catch (Exception ignored) { }
         return sent;
     }
@@ -242,8 +255,49 @@ public final class ActivityEventStore {
                     break;
                 }
             }
-            p.edit().putString(KEY_EVENTS, all.toString()).putBoolean(KEY_PENDING, containsPending(all)).apply();
+            int pending = pendingCountOf(all);
+            p.edit().putString(KEY_EVENTS, all.toString()).putBoolean(KEY_PENDING, pending > 0).putInt(KEY_PENDING_COUNT, pending).apply();
         } catch (Exception ignored) { }
+    }
+
+    public static int pendingCount(Context ctx) {
+        SharedPreferences p = AppPrefs.get(ctx);
+        if (p.contains(KEY_PENDING_COUNT)) return Math.max(0, p.getInt(KEY_PENDING_COUNT, 0));
+        try {
+            int count = pendingCountOf(new JSONArray(p.getString(KEY_EVENTS, "[]")));
+            p.edit().putInt(KEY_PENDING_COUNT, count).putBoolean(KEY_PENDING, count > 0).apply();
+            return count;
+        } catch (Exception ignored) { return 0; }
+    }
+
+    private static int pendingCountOf(JSONArray events) {
+        int count = 0;
+        if (events == null) return count;
+        for (int i = 0; i < events.length(); i++) if (isPending(events.optJSONObject(i))) count++;
+        return count;
+    }
+
+    private static void trimForStorage(java.util.ArrayList<JSONObject> items) {
+        while (items.size() > MAX_EVENTS) {
+            int removeAt = -1;
+            for (int i = items.size() - 1; i >= 0; i--) {
+                if (!isPending(items.get(i))) { removeAt = i; break; }
+            }
+            if (removeAt < 0) removeAt = items.size() - 1;
+            items.remove(removeAt);
+        }
+    }
+
+    private static boolean isHomeLauncher(Context ctx, String pkg) {
+        if (pkg == null || pkg.trim().isEmpty()) return false;
+        String value = pkg.trim();
+        if ("com.miui.home".equals(value) || "com.android.launcher3".equals(value) || "com.google.android.apps.nexuslauncher".equals(value)) return true;
+        try {
+            Intent intent = new Intent(Intent.ACTION_MAIN);
+            intent.addCategory(Intent.CATEGORY_HOME);
+            ResolveInfo info = ctx.getPackageManager().resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+            return info != null && info.activityInfo != null && value.equals(info.activityInfo.packageName);
+        } catch (Exception ignored) { return false; }
     }
 
     private static boolean cloudSyncAllowed(Context ctx) {
