@@ -23,10 +23,14 @@ public final class ActivityEventStore {
     private static final String KEY_PENDING = "activity_events_pending_v1";
     private static final int MAX_EVENTS = 500;
     private static volatile boolean pendingUploadRunning = false;
+    private static final Object LISTENER_LOCK = new Object();
+    private static SharedPreferences observedPrefs;
+    private static SharedPreferences.OnSharedPreferenceChangeListener syncListener;
 
     private ActivityEventStore() { }
 
     public static synchronized JSONObject add(Context ctx, JSONObject input, boolean upload) {
+        ensureSyncListener(ctx);
         JSONObject event = normalize(ctx, input);
         try { event.put("cloud_synced", !upload); } catch (Exception ignored) { }
         try {
@@ -72,6 +76,7 @@ public final class ActivityEventStore {
     }
 
     public static JSONArray list(Context ctx, String source, int limit, boolean todayOnly) {
+        ensureSyncListener(ctx);
         JSONArray out = new JSONArray();
         String today = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(new Date());
         try {
@@ -96,6 +101,7 @@ public final class ActivityEventStore {
     }
 
     private static JSONArray listCategory(Context ctx, int limit, boolean todayOnly, boolean phoneCategory) {
+        ensureSyncListener(ctx);
         JSONArray out = new JSONArray();
         String today = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(new Date());
         try {
@@ -114,6 +120,7 @@ public final class ActivityEventStore {
     }
 
     public static synchronized void mergeRemote(Context ctx, JSONArray remote) {
+        ensureSyncListener(ctx);
         if (remote == null) return;
         try {
             JSONArray local = new JSONArray(AppPrefs.get(ctx).getString(KEY_EVENTS, "[]"));
@@ -138,19 +145,47 @@ public final class ActivityEventStore {
     /** Flush locally queued activity events. Call from a background thread. */
     public static int flushPending(Context ctx) {
         Context app = ctx.getApplicationContext();
+        ensureSyncListener(app);
         if (!cloudSyncAllowed(app) || !AppPrefs.get(app).getBoolean(KEY_PENDING, false)) return 0;
         if (!beginPendingUpload()) return 0;
         try { return flushPendingInternal(app); }
         finally { endPendingUpload(); }
     }
 
+    private static void ensureSyncListener(Context ctx) {
+        if (ctx == null || syncListener != null) return;
+        synchronized (LISTENER_LOCK) {
+            if (syncListener != null) return;
+            Context app = ctx.getApplicationContext();
+            SharedPreferences prefs = AppPrefs.get(app);
+            syncListener = (sharedPreferences, key) -> {
+                if (!"user_stopped".equals(key)) return;
+                if (!sharedPreferences.getBoolean("user_stopped", true)
+                        && sharedPreferences.getBoolean(KEY_PENDING, false)) {
+                    uploadPendingAsync(app);
+                }
+            };
+            observedPrefs = prefs;
+            observedPrefs.registerOnSharedPreferenceChangeListener(syncListener);
+        }
+    }
+
     private static void uploadPendingAsync(Context ctx) {
         Context app = ctx.getApplicationContext();
+        ensureSyncListener(app);
         if (!cloudSyncAllowed(app) || !AppPrefs.get(app).getBoolean(KEY_PENDING, false)) return;
         if (!beginPendingUpload()) return;
         new Thread(() -> {
-            try { flushPendingInternal(app); }
-            finally { endPendingUpload(); }
+            int sent = 0;
+            try { sent = flushPendingInternal(app); }
+            finally {
+                endPendingUpload();
+                // A new event can arrive while a batch is being uploaded. If this batch made progress,
+                // run one more pass so that event is not stranded. Do not spin on network failures.
+                if (sent > 0 && cloudSyncAllowed(app) && AppPrefs.get(app).getBoolean(KEY_PENDING, false)) {
+                    uploadPendingAsync(app);
+                }
+            }
         }, "activity-event-sync").start();
     }
 
