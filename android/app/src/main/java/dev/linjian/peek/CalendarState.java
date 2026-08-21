@@ -17,7 +17,7 @@ import java.util.Locale;
 
 /** 守护日历：纪念日、节日、倒数日、提前三天横幅提醒，并接入生活状态层。 */
 public class CalendarState {
-    public static final String VERSION = "0.3.6.5";
+    public static final String VERSION = "0.3.6.6";
     public static final String KEY_EVENTS = "guard_calendar_events_json";
     public static final String THEME_COLOR = "#B8A8D8";
     public static final int DEFAULT_REMIND_DAYS = 3;

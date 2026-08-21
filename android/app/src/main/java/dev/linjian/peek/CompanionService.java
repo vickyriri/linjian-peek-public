@@ -42,6 +42,7 @@ public class CompanionService extends Service {
     private HandlerThread pollThread;
     private long rateLimitedUntilMs = 0L;
     private static long lastStateUploadMs = 0L;
+    private static long lastDetailedUsageUploadMs = 0L;
 
     public static boolean isRunning() { return running; }
     @Override public IBinder onBind(Intent intent) { return null; }
@@ -62,7 +63,7 @@ public class CompanionService extends Service {
             DebugState.append(this, "服务启动失败：服务器地址或 Token 为空");
             stopSelf(); return START_NOT_STICKY;
         }
-        DebugState.append(this, "掌心窗公开版 v0.3.6.5 服务已启动，目标：" + serverUrl);
+        DebugState.append(this, "掌心窗 Astra Custom v0.3（0.3.6.6）服务已启动，目标：" + serverUrl);
         if (!running) { running = true; startPolling(); } else DebugState.append(this, "服务已在运行，继续轮询");
         return START_STICKY;
     }
@@ -461,10 +462,12 @@ public class CompanionService extends Service {
         long now = System.currentTimeMillis();
         if (!force && now - lastStateUploadMs < AppPrefs.STATE_UPLOAD_INTERVAL_MS) return;
         lastStateUploadMs = now;
-        JSONObject state = LifeState.collect(ctx);
+        boolean includeUsageDetails = force || now - lastDetailedUsageUploadMs >= 60_000L;
+        if (includeUsageDetails) lastDetailedUsageUploadMs = now;
+        JSONObject state = LifeState.collect(ctx, includeUsageDetails);
         // 归电自动补弹：随生活状态上传定期检查；已限频，避免公开后端被状态上报打到 429。
         GuidianState.evaluate(ctx, state);
-        state = LifeState.collect(ctx);
+        state = LifeState.collect(ctx, includeUsageDetails);
         postJson(serverUrl + "/api/device/state", token, state);
         ActiveReminder.evaluate(ctx, state);
         HomeMode.evaluate(ctx, state);

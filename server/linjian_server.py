@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""掌心窗公开版 v0.3.6.5 unified server.
+"""掌心窗公开版 v0.3.6.6 unified server.
 
 零依赖标准库版，负责：
 1. 给手机端下发 peek / open_app / back / home / recents / tap / swipe / set_alarm / send_notification 命令；
@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 DEFAULT_PORT = 8513
 DEFAULT_KEEP = 3
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
-VERSION = "0.3.6.5"
+VERSION = "0.3.6.6"
 DEFAULT_DEVICE = os.environ.get("LINJIAN_DEFAULT_DEVICE", "android-phone")
 ACTIVITY_EVENT_LIMIT = 500
 
@@ -438,6 +438,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/device/state":
             if not self._require_token(): return
             data = self._read_json(); device_id = data.get("device_id") or DEFAULT_DEVICE
+            previous = self.state.device_states.get(device_id) or {}
+            detail_keys = (
+                "complete_app_ranking_today", "hourly_usage_today", "usage_sessions_today",
+                "usage_data_trust", "usage_details_updated_at_ms", "usage_details_updated_at",
+            )
+            # Android sends a lightweight current-state heartbeat every 10 seconds and the larger
+            # usage timeline once a minute. Preserve the latest same-day detail block between them.
+            if previous.get("local_date") == data.get("local_date"):
+                for key in detail_keys:
+                    if key not in data and key in previous: data[key] = previous[key]
             data["updated_at"] = now_iso(); self.state.device_states[device_id] = data
             self._json(200, {"ok": True, "device_id": device_id}); return
         if path == "/api/device/report":
