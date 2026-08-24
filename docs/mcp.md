@@ -1,4 +1,4 @@
-# MCP 工具清单（v0.3.6.6 Astra Custom）
+# MCP 工具清单（v0.3.6.7 Astra Custom）
 
 掌心窗 MCP 服务把手机端能力暴露给支持 MCP 的客户端。所有工具都需要你自己的 `LINJIAN_TOKEN`，并且手机端需要保持服务启动。公开版工具只保留通用能力，不包含私人绑定接口、私人 Token、私人服务地址或固定私人关系。
 
@@ -32,7 +32,7 @@ Render 一键部署时，`LINJIAN_URL` 会由 Blueprint 自动引用 server 的�
 
 ## 状态与截图
 
-- `get_checkin_snapshot(device_id)`：**查岗首选主入口**。一次返回当前状态、完整 App 排行、每小时分布、App 使用轨迹区间和数据可信度；只读缓存，不截图、不点击。
+- `get_checkin_snapshot(device_id)`：**查岗首选主入口**。一次返回当前状态、完整 App 排行、每小时分布、App 使用轨迹区间、跨夜手机活动边界和数据可信度；只读缓存，不截图、不点击。跨夜结果用于区分昨夜最后活动、晨间短暂摸手机和首次持续使用，不等同于睡眠监测。
 - `linjian_status()`：检查 MCP 与后端连接状态，确认 `LINJIAN_URL` 和 `LINJIAN_TOKEN` 是否配置，并返回后端健康信息。
 - `peek_screen(wait_seconds)`：请求手机端截一张新截图，并等待上传后返回图片。
 - `latest_screen()`：不触发手机截图，直接读取服务器最近一张截图。

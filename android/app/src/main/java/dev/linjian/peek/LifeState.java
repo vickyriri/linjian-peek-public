@@ -73,7 +73,7 @@ public class LifeState {
             SharedPreferencesCompat prefs = new SharedPreferencesCompat(ctx);
 
             state.put("device_id", AppPrefs.device(ctx));
-            state.put("life_state_version", "0.3.6.6-astra-checkin-v1");
+            state.put("life_state_version", "0.3.6.7-astra-checkin-v1.1");
             state.put("local_time", formatLocal(now, "HH:mm"));
             state.put("local_date", formatLocal(now, "yyyy-MM-dd"));
             state.put("timezone", TimeZone.getDefault().getID());
@@ -97,6 +97,7 @@ public class LifeState {
                 state.put("hourly_usage_today", usage.hourlyUsage);
                 state.put("usage_sessions_today", usage.sessions);
                 state.put("usage_data_trust", usage.dataTrust);
+                state.put("overnight_phone_activity", usage.overnightPhoneActivity);
                 state.put("usage_details_updated_at_ms", now);
                 state.put("usage_details_updated_at", formatIsoLocal(now));
             }
@@ -125,7 +126,7 @@ public class LifeState {
         try {
             JSONObject s = collect(ctx);
             StringBuilder sb = new StringBuilder();
-            sb.append("生活状态层 v0.3.6.6 · Astra 查岗 2.0\n");
+            sb.append("生活状态层 v0.3.6.7 · Astra 查岗 2.1\n");
             sb.append("时间：").append(s.optString("local_time", "-")).append("  ").append(s.optString("local_date", "-")).append("\n");
             sb.append("电量：").append(s.optInt("battery_percent", -1)).append("%  ").append(s.optBoolean("charging") ? "充电中" : "未充电").append("\n");
             sb.append("网络：").append(s.optString("network_type", "-")).append("  屏幕：").append(s.optBoolean("screen_on") ? "亮" : "灭").append("\n");
@@ -212,6 +213,8 @@ public class LifeState {
         cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0);
         long start = cal.getTimeInMillis();
         long queryStart = start - 24L * 60L * 60L * 1000L;
+        long overnightStart = start - 6L * 60L * 60L * 1000L;
+        long overnightEnd = Math.min(now, start + 12L * 60L * 60L * 1000L);
         try {
             UsageStatsManager usm = (UsageStatsManager) ctx.getSystemService(Context.USAGE_STATS_SERVICE);
             if (usm == null) throw new IllegalStateException("usage_stats_manager_unavailable");
@@ -227,9 +230,13 @@ public class LifeState {
                 raw.add(new UsageTimeline.Event(event.getTimeStamp(), type, pkg));
             }
             UsageTimeline.Result timeline = UsageTimeline.build(raw, start, now);
-            fillUsageJson(ctx, summary, timeline, start, queryStart, now);
+            UsageTimeline.Result overnightTimeline = UsageTimeline.build(raw, overnightStart, overnightEnd);
+            UsageTimeline.OvernightSummary overnight = UsageTimeline.analyzeOvernight(
+                    overnightTimeline, overnightStart, overnightEnd, start, start + 8L * 60L * 60L * 1000L);
+            fillUsageJson(ctx, summary, timeline, overnightTimeline, overnight, start, queryStart, now);
         } catch (Exception error) {
             summary.dataTrust = trustJson(false, start, queryStart, now, null, ScreenshotService.shortMsg(error));
+            summary.overnightPhoneActivity = overnightUnavailable(start, now, ScreenshotService.shortMsg(error));
         }
         return summary;
     }
@@ -255,7 +262,9 @@ public class LifeState {
                 || type == UsageTimeline.KEYGUARD_HIDDEN;
     }
 
-    private static void fillUsageJson(Context ctx, UsageSummary summary, UsageTimeline.Result timeline, long start, long queryStart, long now) throws Exception {
+    private static void fillUsageJson(Context ctx, UsageSummary summary, UsageTimeline.Result timeline,
+                                      UsageTimeline.Result overnightTimeline, UsageTimeline.OvernightSummary overnight,
+                                      long start, long queryStart, long now) throws Exception {
         summary.screenTimeMinutes = (int) Math.round(timeline.attributedMs / 60000.0);
         summary.unlockCount = timeline.unlockCount;
         summary.lastUnlockAt = timeline.lastUnlockAt;
@@ -302,6 +311,103 @@ public class LifeState {
             summary.sessions.put(item);
         }
         summary.dataTrust = trustJson(true, start, queryStart, now, timeline, "");
+        summary.overnightPhoneActivity = overnightJson(ctx, labels, overnightTimeline, overnight, now);
+    }
+
+    private static JSONObject overnightJson(Context ctx, Map<String, String> labels, UsageTimeline.Result timeline,
+                                            UsageTimeline.OvernightSummary overnight, long now) throws Exception {
+        JSONObject out = new JSONObject();
+        out.put("source", "android_usage_events_overnight_backfill");
+        out.put("generated_at", formatIsoLocal(now));
+        out.put("interpretation", "phone_inactivity_only_not_sleep_confirmation");
+
+        JSONArray notes = new JSONArray();
+        notes.put("该区间只表示没有读到 App 使用活动，不能直接证明已经入睡。");
+        notes.put("即使昨夜掌心窗和 Render 未运行，重新启动后也会从 Android 系统事件回看补算。");
+        if (overnight == null) {
+            out.put("available", false);
+            out.put("confidence", new JSONObject().put("status", "low").put("score", 20));
+            out.put("notes", notes.put("跨夜分析结果暂不可用。"));
+            out.put("evidence_sessions", new JSONArray());
+            return out;
+        }
+
+        out.put("available", overnight.available());
+        out.put("window_start_at", formatIsoLocal(overnight.windowStartMs));
+        out.put("window_end_at", formatIsoLocal(overnight.windowEndMs));
+        out.put("core_window_start_at", formatIsoLocal(overnight.coreStartMs));
+        out.put("core_window_end_at", formatIsoLocal(overnight.coreEndMs));
+        if (!overnight.available()) {
+            out.put("confidence", new JSONObject().put("status", "low").put("score", 20));
+            out.put("notes", notes.put("跨夜窗口内缺少足够的前后活动证据，不能给出可靠边界。"));
+            out.put("evidence_sessions", new JSONArray());
+            return out;
+        }
+
+        JSONObject idle = new JSONObject();
+        idle.put("start_at", formatIsoLocal(overnight.idleStartMs));
+        idle.put("end_at", formatIsoLocal(overnight.idleEndMs));
+        idle.put("duration_minutes", minutesOneDecimal(overnight.idleDurationMs()));
+        idle.put("completed", overnight.completed());
+        idle.put("overlaps_core_hours", overnight.overlapsCoreHours);
+        out.put("longest_idle_gap", idle);
+        out.put("last_activity_before_idle", sessionJson(ctx, labels, overnight.activityBeforeIdle, now));
+        out.put("first_activity_after_idle", sessionJson(ctx, labels, overnight.activityAfterIdle, now));
+        out.put("first_sustained_activity_at", overnight.firstSustainedActivityAtMs <= 0L
+                ? "" : formatIsoLocal(overnight.firstSustainedActivityAtMs));
+        out.put("sustained_activity_rule", "15分钟内累计App使用达到5分钟");
+        out.put("event_count", timeline == null ? 0 : timeline.eventCount);
+        out.put("session_count", timeline == null ? 0 : timeline.sessions.size());
+
+        int score = overnight.completed() ? 92 : 68;
+        String status = overnight.completed() ? "high" : "medium";
+        if (!overnight.overlapsCoreHours) { score = Math.min(score, 55); status = "low"; }
+        out.put("confidence", new JSONObject().put("status", status).put("score", score));
+        if (!overnight.completed()) notes.put("最长空档有一侧落在观察窗口边界，时间只能视作上限或下限。");
+        out.put("notes", notes);
+
+        JSONArray evidence = new JSONArray();
+        if (timeline != null) {
+            List<UsageTimeline.Session> before = new ArrayList<>();
+            List<UsageTimeline.Session> after = new ArrayList<>();
+            for (UsageTimeline.Session session : timeline.sessions) {
+                if (session.endMs <= overnight.idleStartMs) before.add(session);
+                else if (session.startMs >= overnight.idleEndMs) after.add(session);
+            }
+            int beforeStart = Math.max(0, before.size() - 4);
+            for (int i = beforeStart; i < before.size(); i++) evidence.put(sessionJson(ctx, labels, before.get(i), now));
+            for (int i = 0; i < Math.min(16, after.size()); i++) evidence.put(sessionJson(ctx, labels, after.get(i), now));
+        }
+        out.put("evidence_sessions", evidence);
+        return out;
+    }
+
+    private static Object sessionJson(Context ctx, Map<String, String> labels, UsageTimeline.Session session, long now) throws Exception {
+        if (session == null) return JSONObject.NULL;
+        JSONObject item = new JSONObject();
+        item.put("app", labelFor(ctx, labels, session.packageName));
+        item.put("package", session.packageName);
+        item.put("start_at", formatIsoLocal(session.startMs));
+        item.put("end_at", formatIsoLocal(session.endMs));
+        item.put("duration_seconds", Math.round(session.durationMs() / 1000.0));
+        item.put("minutes", minutesOneDecimal(session.durationMs()));
+        item.put("ongoing", session.endMs >= now - 1_000L);
+        return item;
+    }
+
+    private static JSONObject overnightUnavailable(long midnight, long now, String error) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("available", false);
+            out.put("source", "android_usage_events_overnight_backfill");
+            out.put("window_start_at", formatIsoLocal(midnight - 6L * 60L * 60L * 1000L));
+            out.put("window_end_at", formatIsoLocal(Math.min(now, midnight + 12L * 60L * 60L * 1000L)));
+            out.put("interpretation", "phone_inactivity_only_not_sleep_confirmation");
+            out.put("confidence", new JSONObject().put("status", "unavailable").put("score", 0));
+            out.put("error", error == null ? "" : error);
+            out.put("evidence_sessions", new JSONArray());
+        } catch (Exception ignored) { }
+        return out;
     }
 
     private static JSONObject usageItem(AppUse use, int rank) throws Exception {
@@ -405,12 +511,14 @@ public class LifeState {
         JSONArray hourlyUsage = new JSONArray();
         JSONArray sessions = new JSONArray();
         JSONObject dataTrust = new JSONObject();
+        JSONObject overnightPhoneActivity = new JSONObject();
 
         static UsageSummary unavailable(long now) {
             UsageSummary summary = new UsageSummary();
             Calendar cal = Calendar.getInstance();
             cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0); cal.set(Calendar.MILLISECOND, 0);
             summary.dataTrust = trustJson(false, cal.getTimeInMillis(), cal.getTimeInMillis(), now, null, "usage_permission_not_granted");
+            summary.overnightPhoneActivity = overnightUnavailable(cal.getTimeInMillis(), now, "usage_permission_not_granted");
             return summary;
         }
     }

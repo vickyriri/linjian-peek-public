@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""掌心窗公开版 v0.3.6.6 unified server.
+"""掌心窗公开版 v0.3.6.7 unified server.
 
 零依赖标准库版，负责：
 1. 给手机端下发 peek / open_app / back / home / recents / tap / swipe / set_alarm / send_notification 命令；
@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 DEFAULT_PORT = 8513
 DEFAULT_KEEP = 3
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
-VERSION = "0.3.6.6"
+VERSION = "0.3.6.7"
 DEFAULT_DEVICE = os.environ.get("LINJIAN_DEFAULT_DEVICE", "android-phone")
 ACTIVITY_EVENT_LIMIT = 500
 
@@ -441,7 +441,8 @@ class Handler(BaseHTTPRequestHandler):
             previous = self.state.device_states.get(device_id) or {}
             detail_keys = (
                 "complete_app_ranking_today", "hourly_usage_today", "usage_sessions_today",
-                "usage_data_trust", "usage_details_updated_at_ms", "usage_details_updated_at",
+                "usage_data_trust", "overnight_phone_activity",
+                "usage_details_updated_at_ms", "usage_details_updated_at",
             )
             # Android sends a lightweight current-state heartbeat every 10 seconds and the larger
             # usage timeline once a minute. Preserve the latest same-day detail block between them.

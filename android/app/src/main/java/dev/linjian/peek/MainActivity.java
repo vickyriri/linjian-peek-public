@@ -122,7 +122,7 @@ public class MainActivity extends Activity {
         loadSettings();
         if (companionCloudSyncEnabled != null) companionCloudSyncEnabled.setChecked(AppPrefs.get(this).getBoolean(PREF_COMPANION_CLOUD_SYNC_ENABLED, false));
 
-        DebugState.append(this, "掌心窗 Astra Custom v0.3（0.3.6.6）已打开");
+        DebugState.append(this, "掌心窗 Astra Custom v0.3（0.3.6.7）已打开");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 13);
         serviceRunning = CompanionService.isRunning();
         updateUI();

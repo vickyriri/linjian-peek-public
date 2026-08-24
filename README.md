@@ -1,5 +1,13 @@
 # 掌心窗 Astra Custom v0.3（基于公开版 v0.3.6.5）
 
+## Astra Custom v0.3.1 · 跨夜查岗
+
+- 查岗快照新增 `overnight_phone_activity`：每次服务启动后从 Android UsageEvents 回看昨晚 18:00 至今天 12:00，不要求掌心窗或 Render 整夜在线。
+- 返回跨越零点核心时段的最长手机无活动区间、区间前最后 App、今早第一次短暂使用、首次持续使用时间和附近证据轨迹。
+- “首次持续使用”口径为 15 分钟内累计 App 使用达到 5 分钟；所有结果只代表手机活动边界，不直接断言入睡或起床。
+- 沿用 `get_checkin_snapshot` 主入口，不新增 MCP 工具；全部旧工具继续保留。
+- Android/MCP/后端版本提升为 `0.3.6.7` / `30607`，固定签名保持不变，可覆盖安装 Astra Custom v0.3。
+
 ## Astra Custom v0.3 · 查岗 2.0
 
 - 新增今日完整 App 排行，不再只返回前五名。

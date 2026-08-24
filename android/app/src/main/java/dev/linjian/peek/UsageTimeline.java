@@ -21,6 +21,8 @@ public final class UsageTimeline {
 
     private static final long SESSION_MERGE_GAP_MS = 2_000L;
     private static final long UNLOCK_DEDUPE_MS = 15_000L;
+    private static final long SUSTAINED_WINDOW_MS = 15L * 60L * 1000L;
+    private static final long SUSTAINED_USAGE_MS = 5L * 60L * 1000L;
 
     private UsageTimeline() { }
 
@@ -90,6 +92,42 @@ public final class UsageTimeline {
             if (interactiveMs <= 0L) return attributedMs <= 0L ? 100 : 0;
             return (int) Math.max(0L, Math.min(100L, Math.round(attributedMs * 100.0 / interactiveMs)));
         }
+    }
+
+    /** Compact cross-midnight evidence for estimating when phone use paused overnight. */
+    public static final class OvernightSummary {
+        public long windowStartMs;
+        public long windowEndMs;
+        public long coreStartMs;
+        public long coreEndMs;
+        public long idleStartMs;
+        public long idleEndMs;
+        public Session activityBeforeIdle;
+        public Session activityAfterIdle;
+        public long firstSustainedActivityAtMs;
+        public boolean overlapsCoreHours;
+
+        public boolean available() { return idleEndMs > idleStartMs; }
+        public boolean completed() { return activityBeforeIdle != null && activityAfterIdle != null; }
+        public long idleDurationMs() { return Math.max(0L, idleEndMs - idleStartMs); }
+    }
+
+    private static final class IdleGap {
+        final long startMs;
+        final long endMs;
+        final Session before;
+        final Session after;
+        final boolean overlapsCore;
+
+        IdleGap(long startMs, long endMs, Session before, Session after, long coreStart, long coreEnd) {
+            this.startMs = startMs;
+            this.endMs = endMs;
+            this.before = before;
+            this.after = after;
+            this.overlapsCore = overlap(startMs, endMs, coreStart, coreEnd) > 0L;
+        }
+
+        long durationMs() { return Math.max(0L, endMs - startMs); }
     }
 
     public static Result build(List<Event> input, long windowStart, long windowEnd) {
@@ -184,6 +222,72 @@ public final class UsageTimeline {
         if (!unlocks.isEmpty()) result.lastUnlockAt = unlocks.get(unlocks.size() - 1);
         buildHours(result, interactiveSpans, unlocks, windowStart, windowEnd);
         return result;
+    }
+
+    /**
+     * Finds the longest no-App-activity gap that overlaps the local midnight-to-morning core.
+     * Boundary gaps are allowed so the result can still say "already idle when the window began"
+     * or "still idle now", but completed gaps with evidence on both sides are naturally preferred
+     * when their duration is longer. The result is an activity boundary, not a sleep diagnosis.
+     */
+    public static OvernightSummary analyzeOvernight(Result timeline, long windowStart, long windowEnd,
+                                                     long coreStart, long coreEnd) {
+        OvernightSummary out = new OvernightSummary();
+        out.windowStartMs = windowStart;
+        out.windowEndMs = windowEnd;
+        out.coreStartMs = coreStart;
+        out.coreEndMs = coreEnd;
+        if (timeline == null || windowEnd <= windowStart) return out;
+
+        List<Session> sessions = new ArrayList<>();
+        for (Session session : timeline.sessions) {
+            if (session == null || session.endMs <= windowStart || session.startMs >= windowEnd) continue;
+            sessions.add(session);
+        }
+        Collections.sort(sessions, new Comparator<Session>() {
+            @Override public int compare(Session a, Session b) { return Long.compare(a.startMs, b.startMs); }
+        });
+        if (sessions.isEmpty()) return out;
+
+        List<IdleGap> gaps = new ArrayList<>();
+        Session first = sessions.get(0);
+        if (first.startMs > windowStart) gaps.add(new IdleGap(windowStart, first.startMs, null, first, coreStart, coreEnd));
+        Session previous = first;
+        for (int i = 1; i < sessions.size(); i++) {
+            Session next = sessions.get(i);
+            if (next.startMs > previous.endMs) gaps.add(new IdleGap(previous.endMs, next.startMs, previous, next, coreStart, coreEnd));
+            if (next.endMs >= previous.endMs) previous = next;
+        }
+        if (previous.endMs < windowEnd) gaps.add(new IdleGap(previous.endMs, windowEnd, previous, null, coreStart, coreEnd));
+
+        IdleGap best = null;
+        for (IdleGap gap : gaps) {
+            if (gap.durationMs() <= 0L) continue;
+            if (best == null
+                    || (gap.overlapsCore && !best.overlapsCore)
+                    || (gap.overlapsCore == best.overlapsCore && gap.durationMs() > best.durationMs())) best = gap;
+        }
+        if (best == null) return out;
+
+        out.idleStartMs = best.startMs;
+        out.idleEndMs = best.endMs;
+        out.activityBeforeIdle = best.before;
+        out.activityAfterIdle = best.after;
+        out.overlapsCoreHours = best.overlapsCore;
+        if (best.after != null) out.firstSustainedActivityAtMs = firstSustainedActivityAt(sessions, best.endMs, windowEnd);
+        return out;
+    }
+
+    private static long firstSustainedActivityAt(List<Session> sessions, long afterMs, long windowEnd) {
+        for (Session candidate : sessions) {
+            if (candidate.endMs <= afterMs) continue;
+            long start = Math.max(afterMs, candidate.startMs);
+            long end = Math.min(windowEnd, start + SUSTAINED_WINDOW_MS);
+            long used = 0L;
+            for (Session session : sessions) used += overlap(session.startMs, session.endMs, start, end);
+            if (used >= SUSTAINED_USAGE_MS) return start;
+        }
+        return 0L;
     }
 
     private static void closeSession(List<Session> sessions, long rawStart, long rawEnd, String pkg, long windowStart, long windowEnd) {

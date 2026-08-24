@@ -51,7 +51,7 @@ function effectiveLinjianUrl() {
 const LINJIAN_TOKEN = process.env.LINJIAN_TOKEN || "";
 const DEFAULT_DEVICE = process.env.LINJIAN_DEFAULT_DEVICE || "android-phone";
 
-// v0.3.6.6：公开 MCP 经常被平台限制在 20 秒内返回。
+// v0.3.6.7：公开 MCP 经常被平台限制在 20 秒内返回。
 // 状态读取、活动记录和命令轮询都要快速失败，避免整条工具链被 Render 冷启动、网络抖动或手机端确认弹窗拖到超时。
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.LINJIAN_FETCH_TIMEOUT_MS || 8000);
 const QUICK_FETCH_TIMEOUT_MS = Number(process.env.LINJIAN_QUICK_FETCH_TIMEOUT_MS || 4500);
@@ -100,7 +100,7 @@ function checkinSnapshot(data, deviceId) {
       ok: false,
       error: "life_state_unavailable",
       message: "服务器还没有收到手机状态。请确认掌心窗服务已启动，并检查最后同步时间。",
-      snapshot_version: "astra-checkin-v1",
+      snapshot_version: "astra-checkin-v1.1",
       device_id: deviceId,
       generated_at: generatedAt
     };
@@ -111,6 +111,9 @@ function checkinSnapshot(data, deviceId) {
     : (Array.isArray(state.top_apps_today) ? state.top_apps_today : []);
   const hourly = Array.isArray(state.hourly_usage_today) ? state.hourly_usage_today : [];
   const sessions = Array.isArray(state.usage_sessions_today) ? state.usage_sessions_today : [];
+  const overnight = state.overnight_phone_activity && typeof state.overnight_phone_activity === "object"
+    ? state.overnight_phone_activity
+    : null;
   const nativeTrust = state.usage_data_trust && typeof state.usage_data_trust === "object"
     ? state.usage_data_trust
     : null;
@@ -125,6 +128,7 @@ function checkinSnapshot(data, deviceId) {
   if (!Array.isArray(state.hourly_usage_today)) missing.push("hourly_usage_today");
   if (!Array.isArray(state.usage_sessions_today)) missing.push("usage_sessions_today");
   if (!nativeTrust) missing.push("usage_data_trust");
+  if (!overnight) missing.push("overnight_phone_activity");
 
   const trust = nativeTrust ? { ...nativeTrust } : {
     available: Boolean(state.usage_permission_ready),
@@ -148,7 +152,7 @@ function checkinSnapshot(data, deviceId) {
 
   return {
     ok: true,
-    snapshot_version: "astra-checkin-v1",
+    snapshot_version: "astra-checkin-v1.1",
     device_id: deviceId,
     generated_at: generatedAt,
     current: {
@@ -169,11 +173,19 @@ function checkinSnapshot(data, deviceId) {
       hourly_distribution: hourly,
       journey_intervals: sessions
     },
+    overnight: overnight || {
+      available: false,
+      source: "legacy_phone_without_overnight_backfill",
+      interpretation: "phone_inactivity_only_not_sleep_confirmation",
+      confidence: { status: "unavailable", score: 0 },
+      notes: ["手机端尚未提供跨夜补算；不能据此判断昨晚最后一次使用手机的具体时间。"]
+    },
     data_trust: trust,
     compatibility: {
       old_tools_preserved: true,
       source_life_state_version: state.life_state_version || "",
-      complete_v03_fields: missing.length === 0
+      complete_v03_fields: ["complete_app_ranking_today", "hourly_usage_today", "usage_sessions_today", "usage_data_trust"].every((key) => !missing.includes(key)),
+      overnight_backfill_available: Boolean(overnight)
     },
     privacy: "只汇总 App 名称、使用区间与设备状态；不读取聊天内容、输入内容或页面内容。"
   };
@@ -889,7 +901,7 @@ async function fetchLatestImage() {
 }
 
 function makeServer() {
-  const server = new McpServer({ name: "掌心窗", version: "0.3.6.6" });
+  const server = new McpServer({ name: "掌心窗", version: "0.3.6.7" });
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
     "add_guardian_calendar_event", "care_action", "trigger_guidian", "mark_guidian_returned",
@@ -1015,7 +1027,7 @@ function makeServer() {
     }
   });
 
-  server.tool("get_checkin_snapshot", "掌心窗查岗的首选主入口。一次读取当前状态、今日完整 App 排行、每小时使用/解锁分布、App 使用轨迹区间和数据可信度。只读服务器最近缓存，不截图、不点击、不读取聊天或页面内容；旧版工具仍全部保留。", {
+  server.tool("get_checkin_snapshot", "掌心窗查岗的首选主入口。一次读取当前状态、今日完整 App 排行、每小时使用/解锁分布、App 使用轨迹区间、跨夜手机活动边界和数据可信度。跨夜字段用于推测最后手机活动与晨间首次/持续使用，不等同于确认睡眠。只读服务器最近缓存，不截图、不点击、不读取聊天或页面内容；旧版工具仍全部保留。", {
     device_id: z.string().default(DEFAULT_DEVICE)
   }, async ({ device_id = DEFAULT_DEVICE }) => {
     try {
@@ -1028,7 +1040,7 @@ function makeServer() {
         error: "checkin_snapshot_fetch_failed",
         message: "查岗快照暂时读不到手机状态；请检查服务是否启动、Render 是否刚从休眠中醒来，以及 URL/Token 是否正确。",
         detail: String(error?.message || error).slice(0, 500),
-        snapshot_version: "astra-checkin-v1",
+        snapshot_version: "astra-checkin-v1.1",
         device_id,
         generated_at: new Date().toISOString()
       });
@@ -1730,13 +1742,13 @@ app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 unified MCP i
 app.get("/health", (_req, res) => res.json({
   ok: true,
   service: "linjian-public-mcp",
-  version: "0.3.6.6",
+  version: "0.3.6.7",
   has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
   has_token: Boolean(LINJIAN_TOKEN),
   configured_linjian_url: RAW_LINJIAN_URL || "",
   effective_linjian_url: effectiveLinjianUrl(),
   fallback_linjian_urls: LINJIAN_URL_CANDIDATES.filter((u) => u !== RAW_LINJIAN_URL),
-  stability_note: "v0.3.6.6 新增查岗快照、完整排行、小时分布、轨迹区间和显式数据可信度；旧工具全部保留。"
+  stability_note: "v0.3.6.7 为现有查岗快照新增跨夜活动回看，可在服务夜间关闭后补算最后手机活动与晨间边界；旧工具全部保留。"
 }));
 app.post("/mcp", async (req, res) => {
   try { const server = makeServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }

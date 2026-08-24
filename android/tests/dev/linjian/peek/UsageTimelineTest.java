@@ -14,6 +14,9 @@ public final class UsageTimelineTest {
         closesSessionWhenScreenTurnsOff();
         prefersRealUnlocksAndDeduplicatesThem();
         reportsUnattributedInteractiveTime();
+        findsCompletedCrossMidnightIdleGap();
+        distinguishesBriefPickupFromSustainedUse();
+        reportsOpenEndedOvernightIdleGap();
         System.out.println("UsageTimelineTest: all assertions passed");
     }
 
@@ -73,11 +76,66 @@ public final class UsageTimelineTest {
         eq(50, r.coveragePercent(), "coverage percent");
     }
 
+    private static void findsCompletedCrossMidnightIdleGap() {
+        long midnight = BASE + 6 * HOUR;
+        List<UsageTimeline.Event> e = new ArrayList<>();
+        e.add(event(midnight - 40 * MIN, UsageTimeline.FOREGROUND, "chat.app"));
+        e.add(event(midnight - 30 * MIN, UsageTimeline.BACKGROUND, "chat.app"));
+        e.add(event(midnight + 6 * HOUR + 36 * MIN, UsageTimeline.FOREGROUND, "clock.app"));
+        e.add(event(midnight + 6 * HOUR + 37 * MIN, UsageTimeline.BACKGROUND, "clock.app"));
+        UsageTimeline.Result r = UsageTimeline.build(e, midnight - 6 * HOUR, midnight + 8 * HOUR);
+        UsageTimeline.OvernightSummary o = UsageTimeline.analyzeOvernight(
+                r, midnight - 6 * HOUR, midnight + 8 * HOUR, midnight, midnight + 8 * HOUR);
+        yes(o.available(), "overnight gap available");
+        yes(o.completed(), "overnight gap completed");
+        eq(midnight - 30 * MIN, o.idleStartMs, "last phone activity boundary");
+        eq(midnight + 6 * HOUR + 36 * MIN, o.idleEndMs, "first morning pickup boundary");
+        eq(7 * HOUR + 6 * MIN, o.idleDurationMs(), "overnight idle duration");
+    }
+
+    private static void distinguishesBriefPickupFromSustainedUse() {
+        long midnight = BASE + 6 * HOUR;
+        List<UsageTimeline.Event> e = new ArrayList<>();
+        e.add(event(midnight - 20 * MIN, UsageTimeline.FOREGROUND, "video.app"));
+        e.add(event(midnight - 10 * MIN, UsageTimeline.BACKGROUND, "video.app"));
+        e.add(event(midnight + 6 * HOUR + 36 * MIN, UsageTimeline.FOREGROUND, "clock.app"));
+        e.add(event(midnight + 6 * HOUR + 37 * MIN, UsageTimeline.BACKGROUND, "clock.app"));
+        e.add(event(midnight + 7 * HOUR + 24 * MIN, UsageTimeline.FOREGROUND, "chat.app"));
+        e.add(event(midnight + 7 * HOUR + 34 * MIN, UsageTimeline.BACKGROUND, "chat.app"));
+        UsageTimeline.Result r = UsageTimeline.build(e, midnight - 6 * HOUR, midnight + 8 * HOUR);
+        UsageTimeline.OvernightSummary o = UsageTimeline.analyzeOvernight(
+                r, midnight - 6 * HOUR, midnight + 8 * HOUR, midnight, midnight + 8 * HOUR);
+        eq(midnight + 6 * HOUR + 36 * MIN, o.idleEndMs, "brief first pickup retained");
+        eq(midnight + 7 * HOUR + 24 * MIN, o.firstSustainedActivityAtMs, "later sustained use detected");
+    }
+
+    private static void reportsOpenEndedOvernightIdleGap() {
+        long midnight = BASE + 6 * HOUR;
+        List<UsageTimeline.Event> e = new ArrayList<>();
+        e.add(event(midnight - 30 * MIN, UsageTimeline.FOREGROUND, "book.app"));
+        e.add(event(midnight - 20 * MIN, UsageTimeline.BACKGROUND, "book.app"));
+        UsageTimeline.Result r = UsageTimeline.build(e, midnight - 6 * HOUR, midnight + 7 * HOUR);
+        UsageTimeline.OvernightSummary o = UsageTimeline.analyzeOvernight(
+                r, midnight - 6 * HOUR, midnight + 7 * HOUR, midnight, midnight + 8 * HOUR);
+        yes(o.available(), "open overnight gap available");
+        no(o.completed(), "open overnight gap not completed");
+        eq(midnight - 20 * MIN, o.idleStartMs, "open gap starts at last activity");
+        eq(midnight + 7 * HOUR, o.idleEndMs, "open gap ends at observation time");
+    }
+
     private static UsageTimeline.Event event(long at, int type, String pkg) {
         return new UsageTimeline.Event(at, type, pkg);
     }
 
     private static void eq(long expected, long actual, String name) {
         if (expected != actual) throw new AssertionError(name + ": expected=" + expected + " actual=" + actual);
+    }
+
+    private static void yes(boolean value, String name) {
+        if (!value) throw new AssertionError(name + ": expected true");
+    }
+
+    private static void no(boolean value, String name) {
+        if (value) throw new AssertionError(name + ": expected false");
     }
 }
