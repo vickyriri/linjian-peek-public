@@ -1,0 +1,52 @@
+name: Test MCP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'mcp/**'
+      - '.github/workflows/mcp-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install MCP dependencies
+        working-directory: mcp
+        run: npm install
+
+      - name: Check syntax and lyric behavior
+        working-directory: mcp
+        run: |
+          npm run check
+          npm test
+
+      - name: Verify MCP registration and health
+        working-directory: mcp
+        run: |
+          test "$(grep -c 'server.tool(' server.js)" -eq 69
+          PORT=8787 npm start > /tmp/zhangxinchuang-mcp.log 2>&1 &
+          mcp_pid=$!
+          trap 'kill "$mcp_pid" 2>/dev/null || true' EXIT
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent http://127.0.0.1:8787/health > /tmp/mcp-health.json; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q '"version":"0.3.6.8"' /tmp/mcp-health.json
+          grep -q '"polling":false' /tmp/mcp-health.json
+          grep -q '"background_retry":false' /tmp/mcp-health.json
+          grep -q '无轮询' /tmp/mcp-health.json

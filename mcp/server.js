@@ -5,6 +5,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import { getMusicCompanionStatus, lookupLyrics } from "./music_companion.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const RAW_LINJIAN_URL = (process.env.LINJIAN_URL || "").trim();
@@ -901,7 +902,7 @@ async function fetchLatestImage() {
 }
 
 function makeServer() {
-  const server = new McpServer({ name: "掌心窗", version: "0.3.6.7" });
+  const server = new McpServer({ name: "掌心窗", version: "0.3.6.8" });
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
     "add_guardian_calendar_event", "care_action", "trigger_guidian", "mark_guidian_returned",
@@ -915,7 +916,7 @@ function makeServer() {
   server.tool = (...args) => {
     const toolName = String(args[0] || "");
     const callbackIndex = args.map((x) => typeof x).lastIndexOf("function");
-    if (callbackIndex >= 0 && toolName !== "get_activity_events" && toolName !== "add_activity_event" && toolName !== "get_checkin_snapshot" && !commandBackedTools.has(toolName)) {
+    if (callbackIndex >= 0 && toolName !== "get_activity_events" && toolName !== "add_activity_event" && toolName !== "get_checkin_snapshot" && toolName !== "music_companion" && !commandBackedTools.has(toolName)) {
       const callback = args[callbackIndex];
       args[callbackIndex] = async (...callArgs) => {
         try {
@@ -1047,7 +1048,21 @@ function makeServer() {
     }
   });
 
-
+  server.tool(
+    "music_companion",
+    "掌心窗·音乐口袋。仅当用户明确想看、查、理解某首歌的歌词，或明确邀请一起听时调用；闲聊里只提到歌名时不要自行查询。第一阶段只支持 action=lyrics：按需搜索歌词，优先网易云公开网页接口，失败时回退 LRCLIB；不需要账号、Cookie 或手机服务。可能返回原文、翻译、罗马音、匹配可信度与候选歌曲。若匹配不确定，应把候选告诉用户并请她补充歌手/专辑/时长，不要猜。歌词仅供理解和分析，回复中不要逐字粘贴完整受版权保护歌词，只引用必要的极短片段。这个工具没有轮询、心跳、定时器或后台重试，只有被明确调用时才访问外部歌词源。",
+    {
+      action: z.enum(["lyrics"]).default("lyrics").describe("当前仅支持 lyrics；以后的一起听能力仍会收在这个工具里。"),
+      title: z.string().min(1).max(200).describe("歌曲名，必填。"),
+      artist: z.string().max(200).default("").describe("歌手名；同名歌曲较多时强烈建议填写。"),
+      album: z.string().max(200).default("").describe("专辑名，可选，用于消歧。"),
+      duration_seconds: z.number().int().min(1).max(86400).optional().describe("歌曲时长（秒），可选，用于区分现场版、重制版等。")
+    },
+    async ({ action = "lyrics", title, artist = "", album = "", duration_seconds }) => {
+      if (action !== "lyrics") return textResult({ ok: false, error: "unsupported_music_action", action });
+      return textResult(await lookupLyrics({ title, artist, album, duration_seconds }));
+    }
+  );
 
   server.tool("get_screen_nodes", "读取当前屏幕无障碍节点：文字、控件类型、可点击状态与 bounds/center 坐标。当用户提到某个按钮、标题、列表项、评论框、发送键、红点位置，或需要陪伴对象看标题后精准点击时主动调用。", {
     device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
@@ -1742,13 +1757,14 @@ app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 unified MCP i
 app.get("/health", (_req, res) => res.json({
   ok: true,
   service: "linjian-public-mcp",
-  version: "0.3.6.7",
+  version: "0.3.6.8",
   has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
   has_token: Boolean(LINJIAN_TOKEN),
   configured_linjian_url: RAW_LINJIAN_URL || "",
   effective_linjian_url: effectiveLinjianUrl(),
   fallback_linjian_urls: LINJIAN_URL_CANDIDATES.filter((u) => u !== RAW_LINJIAN_URL),
-  stability_note: "v0.3.6.7 为现有查岗快照新增跨夜活动回看，可在服务夜间关闭后补算最后手机活动与晨间边界；旧工具全部保留。"
+  music_companion: getMusicCompanionStatus(),
+  stability_note: "v0.3.6.8 仅为现有 MCP 新增按需歌词查询；无轮询、心跳或后台重试，不改变手机端与主服务器行为。旧工具全部保留。"
 }));
 app.post("/mcp", async (req, res) => {
   try { const server = makeServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }
